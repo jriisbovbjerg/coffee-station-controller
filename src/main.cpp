@@ -6,6 +6,9 @@
 #include <ArduinoOTA.h>
 #include <SPI.h>
 #include "Adafruit_MAX31855.h"
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
 
 
 /* platform.ini
@@ -39,6 +42,50 @@ WiFiClient espClient;
 // Hostname and payload for InfluxDB (will be updated from ArduinoOTA)
 String hostnameStr = "coffee";
 String payload = "default";
+
+// ======= Web Server and Configuration =======
+AsyncWebServer webServer(80);
+Preferences preferences;
+
+// Coffee Station Configuration Structure
+struct CoffeeConfig {
+  // Temperature settings (Celsius)
+  float brewTemp = 93.0;          // Espresso brewing temperature
+  float steamTemp = 150.0;        // Steam wand temperature
+  
+  // Shot lengths (pump run time in seconds)
+  float shotSizes[4] = {15.0, 25.0, 35.0, 45.0};  // Small, Medium, Large, Extra Large
+  const char* shotNames[4] = {"Small", "Medium", "Large", "XL"};
+  
+  // Grind amounts (grinder run time in seconds)
+  float grindTimes[2] = {12.0, 18.0};  // Single shot, Double shot
+  const char* grindNames[2] = {"Single", "Double"};
+  
+  // PID parameters (for future use)
+  float pidKp = 2.0;
+  float pidKi = 5.0;
+  float pidKd = 1.0;
+  
+  // System settings
+  bool enableInfluxDB = true;
+  int tempUpdateInterval = 1000;   // milliseconds
+  
+  // Network settings (for future use)
+  char customSSID[32] = "";
+  char customPassword[64] = "";
+} coffeeConfig;
+
+// Current system state
+struct SystemState {
+  float currentTemp = 0.0;
+  float targetTemp = 0.0;
+  bool heatingElement = false;
+  bool pump = false;
+  bool grinder = false;
+  bool steamMode = false;
+  String currentOperation = "Idle";
+  unsigned long operationStartTime = 0;
+} systemState;
 
 // ======= Global Variables =======
 unsigned long previousMillis = 0;
@@ -103,6 +150,291 @@ void send_value(String location, String value) {
   udp.beginPacket(udp_host, udp_port);
   udp.print(payload);
   udp.endPacket();
+}
+
+// ======= Configuration Management =======
+void saveConfiguration() {
+  preferences.begin("coffee-config", false);
+  
+  preferences.putFloat("brewTemp", coffeeConfig.brewTemp);
+  preferences.putFloat("steamTemp", coffeeConfig.steamTemp);
+  
+  // Save shot sizes
+  for (int i = 0; i < 4; i++) {
+    String key = "shot" + String(i);
+    preferences.putFloat(key.c_str(), coffeeConfig.shotSizes[i]);
+  }
+  
+  // Save grind times
+  for (int i = 0; i < 2; i++) {
+    String key = "grind" + String(i);
+    preferences.putFloat(key.c_str(), coffeeConfig.grindTimes[i]);
+  }
+  
+  preferences.putFloat("pidKp", coffeeConfig.pidKp);
+  preferences.putFloat("pidKi", coffeeConfig.pidKi);
+  preferences.putFloat("pidKd", coffeeConfig.pidKd);
+  preferences.putBool("influxEnable", coffeeConfig.enableInfluxDB);
+  preferences.putInt("tempInterval", coffeeConfig.tempUpdateInterval);
+  
+  preferences.end();
+  Serial.println("Configuration saved to flash memory");
+}
+
+void loadConfiguration() {
+  preferences.begin("coffee-config", true); // read-only
+  
+  coffeeConfig.brewTemp = preferences.getFloat("brewTemp", 93.0);
+  coffeeConfig.steamTemp = preferences.getFloat("steamTemp", 150.0);
+  
+  // Load shot sizes
+  for (int i = 0; i < 4; i++) {
+    String key = "shot" + String(i);
+    coffeeConfig.shotSizes[i] = preferences.getFloat(key.c_str(), coffeeConfig.shotSizes[i]);
+  }
+  
+  // Load grind times
+  for (int i = 0; i < 2; i++) {
+    String key = "grind" + String(i);
+    coffeeConfig.grindTimes[i] = preferences.getFloat(key.c_str(), coffeeConfig.grindTimes[i]);
+  }
+  
+  coffeeConfig.pidKp = preferences.getFloat("pidKp", 2.0);
+  coffeeConfig.pidKi = preferences.getFloat("pidKi", 5.0);
+  coffeeConfig.pidKd = preferences.getFloat("pidKd", 1.0);
+  coffeeConfig.enableInfluxDB = preferences.getBool("influxEnable", true);
+  coffeeConfig.tempUpdateInterval = preferences.getInt("tempInterval", 1000);
+  
+  preferences.end();
+  Serial.println("Configuration loaded from flash memory");
+}
+
+// ======= Web Server Endpoints =======
+void setupWebServer() {
+  // Serve main configuration page
+  webServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    String html = R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Coffee Station Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f0f0f0; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }
+        .header { text-align: center; color: #8B4513; margin-bottom: 30px; }
+        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .status { background-color: #e8f5e8; }
+        .config { background-color: #f8f8ff; }
+        input[type="number"] { width: 80px; padding: 5px; margin: 5px; }
+        button { background-color: #8B4513; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
+        button:hover { background-color: #A0522D; }
+        .status-display { font-size: 18px; font-weight: bold; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="header">☕ Coffee Station Control</h1>
+        
+        <div class="section status">
+            <h2>Current Status</h2>
+            <div id="status" class="status-display">Loading...</div>
+        </div>
+        
+        <div class="section config">
+            <h2>Temperature Settings</h2>
+            <div class="grid">
+                <div>
+                    <label>Brew Temperature (°C):</label><br>
+                    <input type="number" id="brewTemp" step="0.5" min="80" max="100">
+                </div>
+                <div>
+                    <label>Steam Temperature (°C):</label><br>
+                    <input type="number" id="steamTemp" step="0.5" min="100" max="170">
+                </div>
+            </div>
+        </div>
+        
+        <div class="section config">
+            <h2>Shot Sizes (seconds)</h2>
+            <div class="grid">
+                <div><label>Small:</label><br><input type="number" id="shot0" step="0.5" min="5" max="60"></div>
+                <div><label>Medium:</label><br><input type="number" id="shot1" step="0.5" min="5" max="60"></div>
+                <div><label>Large:</label><br><input type="number" id="shot2" step="0.5" min="5" max="60"></div>
+                <div><label>Extra Large:</label><br><input type="number" id="shot3" step="0.5" min="5" max="60"></div>
+            </div>
+        </div>
+        
+        <div class="section config">
+            <h2>Grind Times (seconds)</h2>
+            <div class="grid">
+                <div>
+                    <label>Single Shot:</label><br>
+                    <input type="number" id="grind0" step="0.5" min="5" max="30">
+                </div>
+                <div>
+                    <label>Double Shot:</label><br>
+                    <input type="number" id="grind1" step="0.5" min="5" max="30">
+                </div>
+            </div>
+        </div>
+        
+        <div class="section config">
+            <h2>System Settings</h2>
+            <label><input type="checkbox" id="enableInflux"> Enable InfluxDB Logging</label><br>
+            <label>Temperature Update Interval (ms):</label>
+            <input type="number" id="tempInterval" step="100" min="500" max="5000">
+        </div>
+        
+        <div style="text-align: center; margin-top: 20px;">
+            <button onclick="loadConfig()">Reload Config</button>
+            <button onclick="saveConfig()">Save Configuration</button>
+        </div>
+    </div>
+    
+    <script>
+        function updateStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('status').innerHTML = `
+                        Temperature: ${data.currentTemp}°C (Target: ${data.targetTemp}°C)<br>
+                        Operation: ${data.currentOperation}<br>
+                        Heating: ${data.heatingElement ? 'ON' : 'OFF'} | 
+                        Pump: ${data.pump ? 'ON' : 'OFF'} | 
+                        Grinder: ${data.grinder ? 'ON' : 'OFF'}
+                    `;
+                });
+        }
+        
+        function loadConfig() {
+            fetch('/api/config')
+                .then(response => response.json())
+                .then(config => {
+                    document.getElementById('brewTemp').value = config.brewTemp;
+                    document.getElementById('steamTemp').value = config.steamTemp;
+                    for(let i = 0; i < 4; i++) {
+                        document.getElementById('shot' + i).value = config.shotSizes[i];
+                    }
+                    for(let i = 0; i < 2; i++) {
+                        document.getElementById('grind' + i).value = config.grindTimes[i];
+                    }
+                    document.getElementById('enableInflux').checked = config.enableInfluxDB;
+                    document.getElementById('tempInterval').value = config.tempUpdateInterval;
+                });
+        }
+        
+        function saveConfig() {
+            const config = {
+                brewTemp: parseFloat(document.getElementById('brewTemp').value),
+                steamTemp: parseFloat(document.getElementById('steamTemp').value),
+                shotSizes: [],
+                grindTimes: [],
+                enableInfluxDB: document.getElementById('enableInflux').checked,
+                tempUpdateInterval: parseInt(document.getElementById('tempInterval').value)
+            };
+            
+            for(let i = 0; i < 4; i++) {
+                config.shotSizes[i] = parseFloat(document.getElementById('shot' + i).value);
+            }
+            for(let i = 0; i < 2; i++) {
+                config.grindTimes[i] = parseFloat(document.getElementById('grind' + i).value);
+            }
+            
+            fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            })
+            .then(response => response.text())
+            .then(data => alert(data));
+        }
+        
+        // Update status every 2 seconds
+        setInterval(updateStatus, 2000);
+        
+        // Load initial config
+        loadConfig();
+        updateStatus();
+    </script>
+</body>
+</html>
+    )";
+    request->send(200, "text/html", html);
+  });
+  
+  // API endpoint: Get current status
+  webServer.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request){
+    DynamicJsonDocument doc(1024);
+    doc["currentTemp"] = systemState.currentTemp;
+    doc["targetTemp"] = systemState.targetTemp;
+    doc["heatingElement"] = systemState.heatingElement;
+    doc["pump"] = systemState.pump;
+    doc["grinder"] = systemState.grinder;
+    doc["steamMode"] = systemState.steamMode;
+    doc["currentOperation"] = systemState.currentOperation;
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+  
+  // API endpoint: Get configuration
+  webServer.on("/api/config", HTTP_GET, [](AsyncWebServerRequest *request){
+    DynamicJsonDocument doc(1024);
+    doc["brewTemp"] = coffeeConfig.brewTemp;
+    doc["steamTemp"] = coffeeConfig.steamTemp;
+    
+    JsonArray shotSizes = doc.createNestedArray("shotSizes");
+    for(int i = 0; i < 4; i++) {
+      shotSizes.add(coffeeConfig.shotSizes[i]);
+    }
+    
+    JsonArray grindTimes = doc.createNestedArray("grindTimes");
+    for(int i = 0; i < 2; i++) {
+      grindTimes.add(coffeeConfig.grindTimes[i]);
+    }
+    
+    doc["enableInfluxDB"] = coffeeConfig.enableInfluxDB;
+    doc["tempUpdateInterval"] = coffeeConfig.tempUpdateInterval;
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+  
+  // API endpoint: Update configuration
+  webServer.on("/api/config", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+      DynamicJsonDocument doc(1024);
+      deserializeJson(doc, (char*)data);
+      
+      if(doc.containsKey("brewTemp")) coffeeConfig.brewTemp = doc["brewTemp"];
+      if(doc.containsKey("steamTemp")) coffeeConfig.steamTemp = doc["steamTemp"];
+      
+      if(doc.containsKey("shotSizes")) {
+        for(int i = 0; i < 4; i++) {
+          coffeeConfig.shotSizes[i] = doc["shotSizes"][i];
+        }
+      }
+      
+      if(doc.containsKey("grindTimes")) {
+        for(int i = 0; i < 2; i++) {
+          coffeeConfig.grindTimes[i] = doc["grindTimes"][i];
+        }
+      }
+      
+      if(doc.containsKey("enableInfluxDB")) coffeeConfig.enableInfluxDB = doc["enableInfluxDB"];
+      if(doc.containsKey("tempUpdateInterval")) coffeeConfig.tempUpdateInterval = doc["tempUpdateInterval"];
+      
+      saveConfiguration();
+      request->send(200, "text/plain", "Configuration saved successfully!");
+    }
+  );
+  
+  webServer.begin();
+  Serial.println("Web server started on http://" + hostnameStr + ".local/");
 }
 
 bool startMDNS() {
@@ -184,6 +516,12 @@ void setup() {
   hostnameStr = ArduinoOTA.getHostname();
   Serial.println("OTA ready. Flash with hostname: " + hostnameStr + ".local");
   Serial.println("InfluxDB will use hostname: " + hostnameStr);
+  
+  // Load configuration from flash memory
+  loadConfiguration();
+  
+  // Initialize and start web server
+  setupWebServer();
 
   // Initialize temperature sensor
   Serial.println("Initializing MAX31855 K-type thermocouple sensor...");
@@ -207,22 +545,31 @@ void loop() {
   
   unsigned long currentMillis = millis();
 
-  if (currentMillis - previousMillis >= interval) {
+  if (currentMillis - previousMillis >= coffeeConfig.tempUpdateInterval) {
     previousMillis = currentMillis;
     
     // Read temperature from K-type sensor
     float temperature = readTemperature();
     
     if (temperature != -999.0) {
+      // Update system state
+      systemState.currentTemp = temperature;
+      systemState.targetTemp = systemState.steamMode ? coffeeConfig.steamTemp : coffeeConfig.brewTemp;
+      
       Serial.print("Coffee Temperature: ");
       Serial.print(temperature);
-      Serial.println("°C");
+      Serial.print("°C (Target: ");
+      Serial.print(systemState.targetTemp);
+      Serial.println("°C)");
       
-      // Send temperature to InfluxDB
-      send_value("coffee-brew-01", String(temperature));
+      // Send temperature to InfluxDB if enabled
+      if (coffeeConfig.enableInfluxDB) {
+        send_value("coffee-brew-01", String(temperature));
+      }
       
     } else {
       Serial.println("Temperature reading failed - check sensor connection");
+      systemState.currentTemp = -999.0;
     }
     
 
