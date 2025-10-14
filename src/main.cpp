@@ -213,7 +213,7 @@ void loadConfiguration() {
 void setupWebServer() {
   // Serve main configuration page
   webServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    String html = R"(
+    String html = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
@@ -360,13 +360,14 @@ void setupWebServer() {
     </script>
 </body>
 </html>
-    )";
+    )rawliteral";
     request->send(200, "text/html", html);
   });
   
   // API endpoint: Get current status
+  // API endpoint: Get current status
   webServer.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request){
-    DynamicJsonDocument doc(1024);
+    JsonDocument doc;
     doc["currentTemp"] = systemState.currentTemp;
     doc["targetTemp"] = systemState.targetTemp;
     doc["heatingElement"] = systemState.heatingElement;
@@ -376,13 +377,13 @@ void setupWebServer() {
     doc["currentOperation"] = systemState.currentOperation;
     
     String response;
-    serializeJson(doc, response);
+    serializeJson(doc, static_cast<String&>(response));
     request->send(200, "application/json", response);
   });
   
   // API endpoint: Get configuration
   webServer.on("/api/config", HTTP_GET, [](AsyncWebServerRequest *request){
-    DynamicJsonDocument doc(1024);
+    JsonDocument doc;
     doc["brewTemp"] = coffeeConfig.brewTemp;
     doc["steamTemp"] = coffeeConfig.steamTemp;
     
@@ -400,14 +401,14 @@ void setupWebServer() {
     doc["tempUpdateInterval"] = coffeeConfig.tempUpdateInterval;
     
     String response;
-    serializeJson(doc, response);
+    serializeJson(doc, static_cast<String&>(response));
     request->send(200, "application/json", response);
   });
   
   // API endpoint: Update configuration
   webServer.on("/api/config", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
-      DynamicJsonDocument doc(1024);
+      JsonDocument doc;
       deserializeJson(doc, (char*)data);
       
       if(doc.containsKey("brewTemp")) coffeeConfig.brewTemp = doc["brewTemp"];
