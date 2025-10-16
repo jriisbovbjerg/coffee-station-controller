@@ -9,6 +9,8 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <PID_v1.h>
+#include <sTune.h>
 
 
 /* platform.ini
@@ -33,6 +35,9 @@ const char* hostname = "coffee";  // will resolve to coffee.local
 #define MAX31855_CS   5   // Chip Select pin
 #define MAX31855_CLK  18  // Clock pin  
 #define MAX31855_DO   19  // Data Out pin
+
+// ======= Heating Element Control =======
+#define HEATING_ELEMENT_PIN  2  // GPIO2 for SSR control (Fotek SSR-40 DC)
 
 // Initialize the MAX31855 sensor
 Adafruit_MAX31855 thermocouple(MAX31855_CLK, MAX31855_CS, MAX31855_DO);
@@ -61,10 +66,11 @@ struct CoffeeConfig {
   float grindTimes[2] = {12.0, 18.0};  // Single shot, Double shot
   const char* grindNames[2] = {"Single", "Double"};
   
-  // PID parameters (for future use)
+  // PID parameters
   float pidKp = 2.0;
   float pidKi = 5.0;
   float pidKd = 1.0;
+  bool usePID = false;  // false = on/off control, true = PID control
   
   // System settings
   bool enableInfluxDB = true;
@@ -87,9 +93,27 @@ struct SystemState {
   unsigned long operationStartTime = 0;
 } systemState;
 
+// ======= PID Control Variables =======
+double pidInput = 0.0;      // Current temperature (input to PID)
+double pidOutput = 0.0;     // PID output (0-255, but we'll use 0-100 for percentage)
+double pidSetpoint = 0.0;   // Target temperature (setpoint for PID)
+PID heatingPID(&pidInput, &pidOutput, &pidSetpoint, 
+               coffeeConfig.pidKp, coffeeConfig.pidKi, coffeeConfig.pidKd, DIRECT);
+
+// ======= PID AutoTune Variables =======
+float tuneInput = 0.0;
+float tuneOutput = 0.0;
+sTune tuner = sTune(&tuneInput, &tuneOutput, sTune::ZN_PID, sTune::directIP, sTune::printOFF);
+bool autotuning = false;
+unsigned long autotuneStartTime = 0;
+const unsigned long AUTOTUNE_TIMEOUT = 600000; // 10 minutes timeout
+
 // ======= Global Variables =======
 unsigned long previousMillis = 0;
 const unsigned long interval = 1000; // 5 seconds
+
+// ======= Forward Declarations =======
+void saveConfiguration();
 
 // ====== WiFi connection helper function =======//
 bool connectToWiFi(const char* ssid, const char* password, int maxTries = 50) {
@@ -141,6 +165,165 @@ float readTemperature() {
   return tempC;
 }
 
+// ======= Heating Element Control Functions =======
+void setHeatingElement(bool state) {
+  digitalWrite(HEATING_ELEMENT_PIN, state ? HIGH : LOW);
+  systemState.heatingElement = state;
+  
+  Serial.print("Heating element: ");
+  Serial.println(state ? "ON" : "OFF");
+}
+
+bool getHeatingElement() {
+  return systemState.heatingElement;
+}
+
+// Temperature control - supports both on/off and PID control
+void updateHeatingControl() {
+  float currentTemp = systemState.currentTemp;
+  float targetTemp = systemState.targetTemp;
+  
+  if (coffeeConfig.usePID) {
+    // PID Control Mode
+    pidInput = currentTemp;
+    pidSetpoint = targetTemp;
+    
+    heatingPID.Compute();
+    
+    // PID output is 0-255, convert to percentage and use threshold
+    // For SSR: >50% = ON, <=50% = OFF (you can adjust this threshold)
+    float outputPercent = (pidOutput / 255.0) * 100.0;
+    
+    if (outputPercent > 50.0) {
+      if (!systemState.heatingElement) {
+        setHeatingElement(true);
+      }
+    } else {
+      if (systemState.heatingElement) {
+        setHeatingElement(false);
+      }
+    }
+    
+    // Optional: Print PID debug info
+    static unsigned long lastDebug = 0;
+    if (millis() - lastDebug > 5000) {
+      lastDebug = millis();
+      Serial.printf("PID: Input=%.2f, Setpoint=%.2f, Output=%.2f (%.1f%%)\n", 
+                    pidInput, pidSetpoint, pidOutput, outputPercent);
+    }
+    
+  } else {
+    // Simple on/off control with 1°C hysteresis
+    if (currentTemp < targetTemp - 1.0) {
+      if (!systemState.heatingElement) {
+        setHeatingElement(true);
+      }
+    } else if (currentTemp > targetTemp) {
+      if (systemState.heatingElement) {
+        setHeatingElement(false);
+      }
+    }
+    // If within 1°C of target, maintain current state
+  }
+}
+
+// ======= PID AutoTune Functions =======
+void startAutotune() {
+  if (autotuning) {
+    Serial.println("Autotune already running!");
+    return;
+  }
+  
+  // Configure autotune for espresso machine
+  // Configure(inputSpan, outputSpan, outputStart, outputStep, testTimeSec, settleTimeSec, samples)
+  tuner.Configure(50.0,     // Input span (temperature range, e.g., 50°C)
+                  255.0,    // Output span (0-255)
+                  0.0,      // Output start
+                  128.0,    // Output step (50% of range)
+                  10,       // Test time (seconds)
+                  10,       // Settle time (seconds)
+                  300);     // Samples
+  
+  tuner.SetEmergencyStop(systemState.targetTemp + 10.0); // Emergency stop 10°C above target
+  
+  autotuning = true;
+  autotuneStartTime = millis();
+  systemState.currentOperation = "AutoTuning PID";
+  
+  Serial.println("=== PID AutoTune Started ===");
+  Serial.printf("Target Temperature: %.2f°C\n", systemState.targetTemp);
+}
+
+void stopAutotune(bool saveResults) {
+  if (!autotuning) {
+    return;
+  }
+  
+  autotuning = false;
+  
+  if (saveResults) {
+    // Get the tuned parameters
+    coffeeConfig.pidKp = tuner.GetKp();
+    coffeeConfig.pidKi = tuner.GetKi();
+    coffeeConfig.pidKd = tuner.GetKd();
+    
+    // Update the PID controller with new parameters
+    heatingPID.SetTunings(coffeeConfig.pidKp, coffeeConfig.pidKi, coffeeConfig.pidKd);
+    
+    // Save to flash
+    saveConfiguration();
+    
+    Serial.println("=== AutoTune Complete - Parameters Saved ===");
+    Serial.printf("Kp: %.3f, Ki: %.3f, Kd: %.3f\n", 
+                  coffeeConfig.pidKp, coffeeConfig.pidKi, coffeeConfig.pidKd);
+  } else {
+    Serial.println("=== AutoTune Cancelled ===");
+  }
+  
+  systemState.currentOperation = "Idle";
+  // Turn off heating element
+  setHeatingElement(false);
+}
+
+void updateAutotune() {
+  if (!autotuning) {
+    return;
+  }
+  
+  // Check for timeout
+  if (millis() - autotuneStartTime > AUTOTUNE_TIMEOUT) {
+    Serial.println("AutoTune timeout - stopping");
+    stopAutotune(false);
+    return;
+  }
+  
+  // Update autotune with current temperature
+  tuneInput = systemState.currentTemp;
+  
+  // Run the tuner
+  switch (tuner.Run()) {
+    case tuner.sample:
+      // Still sampling, control output based on tuner
+      // The output is stored in the tuneOutput variable by reference
+      if (tuneOutput > 128) {
+        setHeatingElement(true);
+      } else {
+        setHeatingElement(false);
+      }
+      break;
+      
+    case tuner.tunings:
+      // Tuning complete
+      Serial.println("AutoTune sampling complete!");
+      stopAutotune(true);
+      break;
+      
+    case tuner.runPid:
+      // Should not happen during autotune
+      break;
+  }
+}
+
 // ======= InfluxDB Send Function =======
 void send_value(String location, String value) {
   payload = "temp";
@@ -174,6 +357,7 @@ void saveConfiguration() {
   preferences.putFloat("pidKp", coffeeConfig.pidKp);
   preferences.putFloat("pidKi", coffeeConfig.pidKi);
   preferences.putFloat("pidKd", coffeeConfig.pidKd);
+  preferences.putBool("usePID", coffeeConfig.usePID);
   preferences.putBool("influxEnable", coffeeConfig.enableInfluxDB);
   preferences.putInt("tempInterval", coffeeConfig.tempUpdateInterval);
   
@@ -202,6 +386,7 @@ void loadConfiguration() {
   coffeeConfig.pidKp = preferences.getFloat("pidKp", 2.0);
   coffeeConfig.pidKi = preferences.getFloat("pidKi", 5.0);
   coffeeConfig.pidKd = preferences.getFloat("pidKd", 1.0);
+  coffeeConfig.usePID = preferences.getBool("usePID", false);
   coffeeConfig.enableInfluxDB = preferences.getBool("influxEnable", true);
   coffeeConfig.tempUpdateInterval = preferences.getInt("tempInterval", 1000);
   
@@ -218,6 +403,7 @@ void setupWebServer() {
 <html>
 <head>
     <title>Coffee Station Control</title>
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background-color: #f0f0f0; }
@@ -240,17 +426,22 @@ void setupWebServer() {
         <div class="section status">
             <h2>Current Status</h2>
             <div id="status" class="status-display">Loading...</div>
+            <div style="margin-top: 15px;">
+                <button onclick="toggleHeating()">Toggle Heating</button>
+                <button onclick="setBrewMode()">Brew Mode</button>
+                <button onclick="setSteamMode()">Steam Mode</button>
+            </div>
         </div>
         
         <div class="section config">
             <h2>Temperature Settings</h2>
             <div class="grid">
                 <div>
-                    <label>Brew Temperature (°C):</label><br>
+                    <label>Brew Temperature (&deg;C):</label><br>
                     <input type="number" id="brewTemp" step="0.5" min="80" max="100">
                 </div>
                 <div>
-                    <label>Steam Temperature (°C):</label><br>
+                    <label>Steam Temperature (&deg;C):</label><br>
                     <input type="number" id="steamTemp" step="0.5" min="100" max="170">
                 </div>
             </div>
@@ -281,6 +472,33 @@ void setupWebServer() {
         </div>
         
         <div class="section config">
+            <h2>PID Control Parameters</h2>
+            <div style="margin-bottom: 15px;">
+                <label><b>Control Mode:</b></label><br>
+                <input type="checkbox" id="usePID"> Use PID Control (unchecked = simple on/off control)
+            </div>
+            <div class="grid">
+                <div>
+                    <label>Proportional (Kp):</label><br>
+                    <input type="number" id="pidKp" step="0.1" min="0" max="20">
+                </div>
+                <div>
+                    <label>Integral (Ki):</label><br>
+                    <input type="number" id="pidKi" step="0.1" min="0" max="20">
+                </div>
+                <div>
+                    <label>Derivative (Kd):</label><br>
+                    <input type="number" id="pidKd" step="0.1" min="0" max="10">
+                </div>
+            </div>
+            <div style="margin-top: 15px;">
+                <button onclick="startAutotune()" id="autotuneBtn">Start PID AutoTune</button>
+                <button onclick="stopAutotune()" id="stopAutotuneBtn" style="display:none; background-color:#c00;">Stop AutoTune</button>
+                <span id="autotuneStatus" style="margin-left: 10px; font-weight: bold;"></span>
+            </div>
+        </div>
+        
+        <div class="section config">
             <h2>System Settings</h2>
             <label><input type="checkbox" id="enableInflux"> Enable InfluxDB Logging</label><br>
             <label>Temperature Update Interval (ms):</label>
@@ -299,7 +517,7 @@ void setupWebServer() {
                 .then(response => response.json())
                 .then(data => {
                     document.getElementById('status').innerHTML = `
-                        Temperature: ${data.currentTemp}°C (Target: ${data.targetTemp}°C)<br>
+                        Temperature: ${data.currentTemp}&deg;C (Target: ${data.targetTemp}&deg;C)<br>
                         Operation: ${data.currentOperation}<br>
                         Heating: ${data.heatingElement ? 'ON' : 'OFF'} | 
                         Pump: ${data.pump ? 'ON' : 'OFF'} | 
@@ -320,6 +538,10 @@ void setupWebServer() {
                     for(let i = 0; i < 2; i++) {
                         document.getElementById('grind' + i).value = config.grindTimes[i];
                     }
+                    document.getElementById('pidKp').value = config.pidKp;
+                    document.getElementById('pidKi').value = config.pidKi;
+                    document.getElementById('pidKd').value = config.pidKd;
+                    document.getElementById('usePID').checked = config.usePID;
                     document.getElementById('enableInflux').checked = config.enableInfluxDB;
                     document.getElementById('tempInterval').value = config.tempUpdateInterval;
                 });
@@ -331,6 +553,10 @@ void setupWebServer() {
                 steamTemp: parseFloat(document.getElementById('steamTemp').value),
                 shotSizes: [],
                 grindTimes: [],
+                pidKp: parseFloat(document.getElementById('pidKp').value),
+                pidKi: parseFloat(document.getElementById('pidKi').value),
+                pidKd: parseFloat(document.getElementById('pidKd').value),
+                usePID: document.getElementById('usePID').checked,
                 enableInfluxDB: document.getElementById('enableInflux').checked,
                 tempUpdateInterval: parseInt(document.getElementById('tempInterval').value)
             };
@@ -351,8 +577,80 @@ void setupWebServer() {
             .then(data => alert(data));
         }
         
+        function toggleHeating() {
+            fetch('/api/heating/toggle', {method: 'POST'})
+            .then(response => response.text())
+            .then(data => {
+                console.log(data);
+                updateStatus(); // Refresh status immediately
+            });
+        }
+        
+        function setBrewMode() {
+            fetch('/api/mode/brew', {method: 'POST'})
+            .then(response => response.text())
+            .then(data => {
+                console.log(data);
+                updateStatus();
+            });
+        }
+        
+        function setSteamMode() {
+            fetch('/api/mode/steam', {method: 'POST'})
+            .then(response => response.text())
+            .then(data => {
+                console.log(data);
+                updateStatus();
+            });
+        }
+        
+        function startAutotune() {
+            if (confirm('AutoTune will take several minutes and will cycle the heating element. Continue?')) {
+                fetch('/api/autotune/start', {method: 'POST'})
+                .then(response => response.text())
+                .then(data => {
+                    alert(data);
+                    updateAutotuneStatus();
+                });
+            }
+        }
+        
+        function stopAutotune() {
+            fetch('/api/autotune/stop', {method: 'POST'})
+            .then(response => response.text())
+            .then(data => {
+                alert(data);
+                updateAutotuneStatus();
+            });
+        }
+        
+        function updateAutotuneStatus() {
+            fetch('/api/autotune/status')
+            .then(response => response.json())
+            .then(data => {
+                const statusSpan = document.getElementById('autotuneStatus');
+                const startBtn = document.getElementById('autotuneBtn');
+                const stopBtn = document.getElementById('stopAutotuneBtn');
+                
+                if (data.running) {
+                    statusSpan.innerHTML = `Running... (${data.elapsed}s / ${data.timeout}s)`;
+                    statusSpan.style.color = '#ff6600';
+                    startBtn.style.display = 'none';
+                    stopBtn.style.display = 'inline-block';
+                } else {
+                    statusSpan.innerHTML = '';
+                    startBtn.style.display = 'inline-block';
+                    stopBtn.style.display = 'none';
+                    
+                    // Reload config to get updated PID values
+                    loadConfig();
+                }
+            });
+        }
+        
         // Update status every 2 seconds
         setInterval(updateStatus, 2000);
+        setInterval(updateAutotuneStatus, 2000);
         
         // Load initial config
         loadConfig();
@@ -397,6 +695,11 @@ void setupWebServer() {
       grindTimes.add(coffeeConfig.grindTimes[i]);
     }
     
+    doc["pidKp"] = coffeeConfig.pidKp;
+    doc["pidKi"] = coffeeConfig.pidKi;
+    doc["pidKd"] = coffeeConfig.pidKd;
+    doc["usePID"] = coffeeConfig.usePID;
+    
     doc["enableInfluxDB"] = coffeeConfig.enableInfluxDB;
     doc["tempUpdateInterval"] = coffeeConfig.tempUpdateInterval;
     
@@ -426,6 +729,14 @@ void setupWebServer() {
         }
       }
       
+      if(doc.containsKey("pidKp")) coffeeConfig.pidKp = doc["pidKp"];
+      if(doc.containsKey("pidKi")) coffeeConfig.pidKi = doc["pidKi"];
+      if(doc.containsKey("pidKd")) coffeeConfig.pidKd = doc["pidKd"];
+      if(doc.containsKey("usePID")) coffeeConfig.usePID = doc["usePID"];
+      
+      // Update PID controller with new parameters
+      heatingPID.SetTunings(coffeeConfig.pidKp, coffeeConfig.pidKi, coffeeConfig.pidKd);
+      
       if(doc.containsKey("enableInfluxDB")) coffeeConfig.enableInfluxDB = doc["enableInfluxDB"];
       if(doc.containsKey("tempUpdateInterval")) coffeeConfig.tempUpdateInterval = doc["tempUpdateInterval"];
       
@@ -433,6 +744,66 @@ void setupWebServer() {
       request->send(200, "text/plain", "Configuration saved successfully!");
     }
   );
+  
+  // API endpoint: Toggle heating element
+  webServer.on("/api/heating/toggle", HTTP_POST, [](AsyncWebServerRequest *request){
+    bool currentState = getHeatingElement();
+    setHeatingElement(!currentState);
+    request->send(200, "text/plain", currentState ? "Heating OFF" : "Heating ON");
+  });
+  
+  // API endpoint: Set brew mode
+  webServer.on("/api/mode/brew", HTTP_POST, [](AsyncWebServerRequest *request){
+    systemState.steamMode = false;
+    systemState.targetTemp = coffeeConfig.brewTemp;
+    systemState.currentOperation = "Brew Mode";
+    request->send(200, "text/plain", "Switched to Brew Mode (" + String(coffeeConfig.brewTemp) + "&deg;C)");
+  });
+  
+  // API endpoint: Set steam mode
+  webServer.on("/api/mode/steam", HTTP_POST, [](AsyncWebServerRequest *request){
+    systemState.steamMode = true;
+    systemState.targetTemp = coffeeConfig.steamTemp;
+    systemState.currentOperation = "Steam Mode";
+    request->send(200, "text/plain", "Switched to Steam Mode (" + String(coffeeConfig.steamTemp) + "&deg;C)");
+  });
+  
+  // API endpoint: Start PID autotune
+  webServer.on("/api/autotune/start", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (autotuning) {
+      request->send(400, "text/plain", "AutoTune already running!");
+    } else {
+      startAutotune();
+      request->send(200, "text/plain", "AutoTune started - this will take several minutes");
+    }
+  });
+  
+  // API endpoint: Stop PID autotune
+  webServer.on("/api/autotune/stop", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (autotuning) {
+      stopAutotune(false);
+      request->send(200, "text/plain", "AutoTune cancelled");
+    } else {
+      request->send(400, "text/plain", "AutoTune not running");
+    }
+  });
+  
+  // API endpoint: Get autotune status
+  webServer.on("/api/autotune/status", HTTP_GET, [](AsyncWebServerRequest *request){
+    JsonDocument doc;
+    doc["running"] = autotuning;
+    if (autotuning) {
+      doc["elapsed"] = (millis() - autotuneStartTime) / 1000; // seconds
+      doc["timeout"] = AUTOTUNE_TIMEOUT / 1000; // seconds
+    }
+    doc["currentKp"] = coffeeConfig.pidKp;
+    doc["currentKi"] = coffeeConfig.pidKi;
+    doc["currentKd"] = coffeeConfig.pidKd;
+    
+    String response;
+    serializeJson(doc, static_cast<String&>(response));
+    request->send(200, "application/json", response);
+  });
   
   webServer.begin();
   Serial.println("Web server started on http://" + hostnameStr + ".local/");
@@ -459,6 +830,11 @@ bool startMDNS() {
 void setup() {
   Serial.begin(115200);
   delay(100);
+  
+  // Initialize heating element control pin
+  pinMode(HEATING_ELEMENT_PIN, OUTPUT);
+  digitalWrite(HEATING_ELEMENT_PIN, LOW);  // Start with heating OFF
+  Serial.println("Heating element pin initialized (OFF)");
 
   // WiFi connect
   if (!connectToWiFi(ssid, password)) {
@@ -521,6 +897,15 @@ void setup() {
   // Load configuration from flash memory
   loadConfiguration();
   
+  // Initialize PID controller
+  heatingPID.SetMode(AUTOMATIC);
+  heatingPID.SetOutputLimits(0, 255);
+  heatingPID.SetSampleTime(1000); // 1 second sample time
+  Serial.println("PID controller initialized");
+  Serial.printf("PID Parameters: Kp=%.3f, Ki=%.3f, Kd=%.3f, Mode=%s\n", 
+                coffeeConfig.pidKp, coffeeConfig.pidKi, coffeeConfig.pidKd,
+                coffeeConfig.usePID ? "PID" : "On/Off");
+  
   // Initialize and start web server
   setupWebServer();
 
@@ -566,11 +951,28 @@ void loop() {
       // Send temperature to InfluxDB if enabled
       if (coffeeConfig.enableInfluxDB) {
         send_value("coffee-brew-01", String(temperature));
+        send_value("coffe_target-01", String(systemState.targetTemp));
+      }
+      
+      // Update heating control based on temperature
+      // If autotuning, use autotune control, otherwise use normal control
+      if (autotuning) {
+        updateAutotune();
+      } else {
+        updateHeatingControl();
       }
       
     } else {
       Serial.println("Temperature reading failed - check sensor connection");
       systemState.currentTemp = -999.0;
+      // Turn off heating if sensor fails
+      if (systemState.heatingElement) {
+        setHeatingElement(false);
+      }
+      // Stop autotune if running
+      if (autotuning) {
+        stopAutotune(false);
+      }
     }
     
 
