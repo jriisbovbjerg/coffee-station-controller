@@ -34,7 +34,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Environment variables (if you add any config files later)
+# Environment variables and credentials
 .env
 secrets.h
 config_private.h
+src/credentials.h
+
+# Backup files
+*.backup
+*~

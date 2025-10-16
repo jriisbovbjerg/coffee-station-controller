@@ -1,6 +1,6 @@
 # Coffee Station Controller
 
-ESP32-based controller for monitoring and controlling coffee brewing equipment with temperature sensing and InfluxDB logging.
+ESP32-based coffee brewing system with PID temperature control, web interface, and automated tuning.
 
 ## Features
 
@@ -40,26 +40,31 @@ ESP32-based controller for monitoring and controlling coffee brewing equipment w
 
 ## Installation & Setup
 
-1. **Clone the repository**:
+### 1. Configure Credentials (IMPORTANT - First Step!)
+
+**Create your credentials file:**
+```bash
+cp src/credentials.h.template src/credentials.h
+```
+
+**Edit `src/credentials.h` with your actual credentials:**
+```cpp
+const char* WIFI_SSID = "your_wifi_network";
+const char* WIFI_PASSWORD = "your_wifi_password";
+const byte INFLUXDB_HOST[] = {192, 168, 1, 100};  // Your InfluxDB IP
+const int INFLUXDB_PORT = 8089;
+```
+
+⚠️ **SECURITY:** `credentials.h` is gitignored and will NOT be committed to the repository.
+
+### 2. Clone the repository
+
    ```bash
    git clone <repository-url>
    cd coffee_station
    ```
 
-2. **Update WiFi credentials**:
-   Edit `src/main.cpp` and update:
-   ```cpp
-   const char* ssid = "your-wifi-network";
-   const char* password = "your-wifi-password";
-   ```
-
-3. **Configure InfluxDB settings**:
-   Update the InfluxDB host IP in `src/main.cpp`:
-   ```cpp
-   byte udp_host[] = {192, 168, 10, 7}; // Your InfluxDB server IP
-   ```
-
-4. **Build and upload**:
+### 3. Build and upload
    ```bash
    platformio run --target upload
    ```

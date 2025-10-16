@@ -10,6 +10,7 @@
 #include "pid_control.h"
 #include "storage.h"
 #include "web_server.h"
+#include "credentials.h"  // WiFi and InfluxDB credentials (not in git)
 
 // ======= WiFi Settings =======
 const char* ssid = WIFI_SSID;
@@ -17,8 +18,8 @@ const char* password = WIFI_PASSWORD;
 
 // ======= InfluxDB Settings =======
 WiFiUDP udp;
-byte udp_host[] = {192, 168, 10, 7};
-int udp_port = 8089;
+byte udp_host[] = {INFLUXDB_HOST[0], INFLUXDB_HOST[1], INFLUXDB_HOST[2], INFLUXDB_HOST[3]};
+int udp_port = INFLUXDB_PORT;
 
 // ======= mDNS Settings =======
 const char* hostname = "coffee";
