@@ -38,19 +38,18 @@ float readTemperature() {
   
   // Check for sensor errors
   if (isnan(tempC)) {
-    Serial.println("Error: Thermocouple fault detected!");
-    
-    // Get specific error information
-    uint8_t error = thermocouple.readError();
-    if (error & MAX31855_FAULT_OPEN) {
-      Serial.println("FAULT: Thermocouple is open - no connections.");
-    }
-    if (error & MAX31855_FAULT_SHORT_GND) {
-      Serial.println("FAULT: Thermocouple is short-circuited to GND.");
-    }
-    if (error & MAX31855_FAULT_SHORT_VCC) {
-      Serial.println("FAULT: Thermocouple is short-circuited to VCC.");
-    }
+    // TEMP: Disabled error messages for touch calibration
+    // Serial.println("Error: Thermocouple fault detected!");
+    // uint8_t error = thermocouple.readError();
+    // if (error & MAX31855_FAULT_OPEN) {
+    //   Serial.println("FAULT: Thermocouple is open - no connections.");
+    // }
+    // if (error & MAX31855_FAULT_SHORT_GND) {
+    //   Serial.println("FAULT: Thermocouple is short-circuited to GND.");
+    // }
+    // if (error & MAX31855_FAULT_SHORT_VCC) {
+    //   Serial.println("FAULT: Thermocouple is short-circuited to VCC.");
+    // }
     return -999.0; // Return error value
   }
   

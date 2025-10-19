@@ -1,0 +1,75 @@
+#include <Arduino.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <SPI.h>
+
+// ESP32-2432S028R pin configuration
+#define TFT_CS   5   // Chip select control pin
+#define TFT_DC   2   // Data Command control pin
+#define TFT_RST  4   // Reset pin
+#define TFT_BL   21  // LED back-light (PWM controlled)
+
+// Initialize display
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  
+  Serial.println("=== Adafruit GFX Test ===");
+  Serial.println("Testing with Adafruit ILI9341 library...");
+  
+  // Initialize backlight
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+  Serial.println("Backlight enabled");
+  delay(500);
+  
+  // Initialize display
+  Serial.println("Initializing display...");
+  tft.begin();
+  Serial.println("Display initialized");
+  
+  // Set rotation
+  tft.setRotation(1);  // Landscape mode
+  Serial.println("Display rotation set to 1");
+  
+  // Test display with colors
+  Serial.println("Testing display colors...");
+  
+  tft.fillScreen(ILI9341_RED);
+  Serial.println("Red screen");
+  delay(2000);
+  
+  tft.fillScreen(ILI9341_GREEN);
+  Serial.println("Green screen");
+  delay(2000);
+  
+  tft.fillScreen(ILI9341_BLUE);
+  Serial.println("Blue screen");
+  delay(2000);
+  
+  tft.fillScreen(ILI9341_BLACK);
+  Serial.println("Black screen");
+  
+  // Draw text
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(20, 50);
+  tft.println("Adafruit GFX Test");
+  tft.setCursor(20, 80);
+  tft.println("If you see this");
+  tft.setCursor(20, 110);
+  tft.println("Display works!");
+  Serial.println("Text drawn");
+  
+  Serial.println("Adafruit GFX test completed");
+}
+
+void loop() {
+  static unsigned long lastUpdate = 0;
+  if (millis() - lastUpdate > 5000) {
+    lastUpdate = millis();
+    Serial.println("Still running...");
+  }
+}

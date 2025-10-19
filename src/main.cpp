@@ -10,6 +10,7 @@
 #include "pid_control.h"
 #include "storage.h"
 #include "web_server.h"
+#include "display.h"
 #include "credentials.h"  // WiFi and InfluxDB credentials (not in git)
 
 // ======= WiFi Settings =======
@@ -158,6 +159,9 @@ void setup() {
   // Initialize web server
   setupWebServer();
   
+  // Initialize display (LVGL + TFT_eSPI)
+  initDisplay();
+  
   Serial.println("\n========================================");
   Serial.println("   System Ready");
   Serial.println("========================================\n");
@@ -167,6 +171,9 @@ void setup() {
 void loop() {
   // OTA has highest priority - handle first
   ArduinoOTA.handle();
+  
+  // Update display (LVGL needs regular servicing)
+  updateDisplay();
   
   // Skip all other operations if OTA is in progress
   if (otaInProgress) {
@@ -186,11 +193,12 @@ void loop() {
       systemState.currentTemp = temperature;
       systemState.targetTemp = systemState.steamMode ? coffeeConfig.steamTemp : coffeeConfig.brewTemp;
       
-      Serial.print("Coffee Temperature: ");
-      Serial.print(temperature);
-      Serial.print("°C (Target: ");
-      Serial.print(systemState.targetTemp);
-      Serial.println("°C)");
+      // TEMP: Disabled for touch calibration
+      // Serial.print("Coffee Temperature: ");
+      // Serial.print(temperature);
+      // Serial.print("°C (Target: ");
+      // Serial.print(systemState.targetTemp);
+      // Serial.println("°C)");
       
       // Send temperature to InfluxDB if enabled
       if (coffeeConfig.enableInfluxDB) {
@@ -207,7 +215,8 @@ void loop() {
       }
       
     } else {
-      Serial.println("Temperature reading failed - check sensor connection");
+      // TEMP: Disabled for touch calibration
+      // Serial.println("Temperature reading failed - check sensor connection");
       systemState.currentTemp = -999.0;
       // Turn off heating if sensor fails
       if (systemState.heatingElement) {

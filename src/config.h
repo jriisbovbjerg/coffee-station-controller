@@ -37,11 +37,16 @@ struct SystemState {
   float currentTemp = 0.0;
   float targetTemp = 0.0;
   bool heatingElement = false;
+  bool heating = false;  // Display-friendly heating state
   bool pump = false;
   bool grinder = false;
   bool steamMode = false;
   String currentOperation = "Idle";
   unsigned long operationStartTime = 0;
+  
+  // Display selections
+  int selectedShotSize = 0;    // 0-3 for shot sizes
+  int selectedGrindTime = 0;   // 0-1 for grind times
 };
 
 #endif // CONFIG_H

@@ -1,50 +1,50 @@
 #ifndef DISPLAY_H
 #define DISPLAY_H
 
-/*
- * Display Module for ESP32-2432S028R (Cheap Yellow Display)
- * 
- * Hardware: 2.8" TFT LCD with Touch
- * Library: LVGL (LightWeight and Versatile Graphics Library)
- * 
- * Display Features:
- * - Power On/Off button
- * - Brew/Steam mode selector
- * - 4 Coffee size buttons (configured shot times)
- * - 2 Grinder size buttons (configured grind times)
- * 
- * Total: 8 touch buttons for simple operation
- * 
- * TODO: Implement when display hardware arrives
- * 1. Install LVGL library
- * 2. Configure TFT_eSPI for ESP32-2432S028R
- * 3. Design UI layout with 8 buttons
- * 4. Integrate with existing coffee station logic
- */
-
+#include <lvgl.h>
+#include <TFT_eSPI.h>
 #include "config.h"
 
-// Placeholder functions for future implementation
+// ============================================================================
+// DISPLAY CONFIGURATION
+// ============================================================================
+#define DISPLAY_WIDTH  240
+#define DISPLAY_HEIGHT 320
+#define LVGL_TICK_PERIOD_MS 5
 
-// Initialize display hardware and LVGL
+// ============================================================================
+// EXTERNAL DEPENDENCIES
+// ============================================================================
+extern CoffeeConfig coffeeConfig;
+extern SystemState systemState;
+extern void setHeatingElement(bool state);
+extern void saveConfiguration();
+
+// ============================================================================
+// DISPLAY FUNCTIONS
+// ============================================================================
 void initDisplay();
-
-// Update display with current system state
 void updateDisplay();
-
-// Handle touch input
 void handleDisplayTouch();
+void lvglTick();
 
-// Display screens
-void showMainScreen();
-void showSettingsScreen();
+// ============================================================================
+// UI ELEMENT FUNCTIONS
+// ============================================================================
+void createMainUI();
+void updateTemperatureDisplay();
+void updateModeDisplay();
+void updateShotSizeDisplay();
+void updateGrindTimeDisplay();
+void updatePowerButton();
 
-// Future implementation notes:
-// - Use LVGL widgets (lv_btn, lv_label)
-// - Touch calibration on first boot
-// - Show current temp, target temp, operation status
-// - Visual feedback for button presses
-// - Timeout to sleep/dim display
+// ============================================================================
+// TOUCH HANDLERS
+// ============================================================================
+void onPowerButtonPressed(lv_event_t * e);
+void onModeButtonPressed(lv_event_t * e);
+void onShotSizePressed(lv_event_t * e);
+void onGrindTimePressed(lv_event_t * e);
 
 #endif // DISPLAY_H
 
